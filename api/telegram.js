@@ -11,34 +11,52 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { action = 'send', eventType, data, messageId } = req.body;
+    const { action = 'send', eventType, data, messageId } = req.body || {};
 
-    // Capture IP from Vercel headers
+    // Capture IP from Vercel headers (robust fallback)
     const serverIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
                    || req.headers['x-real-ip']
+                   || req.headers['x-vercel-forwarded-for']?.split(',')[0]?.trim()
                    || null;
-    if (data && !data.ip) data.ip = serverIp;
+    if (data && (!data.ip || data.ip === 'Unknown')) data.ip = serverIp || 'Unknown';
 
     // ── DELETE MESSAGE ──
     if (action === 'delete' && messageId) {
-      const result = await tgApi('deleteMessage', {
-        chat_id: TELEGRAM_CHAT_ID,
-        message_id: messageId,
-      });
-      return res.status(200).json({ success: result.ok });
+      try {
+        const result = await tgApi('deleteMessage', {
+          chat_id: TELEGRAM_CHAT_ID,
+          message_id: messageId,
+        });
+        return res.status(200).json({ success: result.ok });
+      } catch (e) {
+        return res.status(200).json({ success: false, error: e.message });
+      }
     }
 
     // ── EDIT MESSAGE ──
     if (action === 'edit' && messageId && eventType) {
-      const message = buildMessage(eventType, data || {});
-      const result = await tgApi('editMessageText', {
-        chat_id: TELEGRAM_CHAT_ID,
-        message_id: messageId,
-        text: message,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      });
-      return res.status(200).json({ success: result.ok, message_id: messageId });
+      try {
+        const message = buildMessage(eventType, data || {});
+        const result = await tgApi('editMessageText', {
+          chat_id: TELEGRAM_CHAT_ID,
+          message_id: messageId,
+          text: message,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        });
+        return res.status(200).json({ success: result.ok, message_id: messageId });
+      } catch (e) {
+        // If edit fails (e.g. message deleted), send as new
+        console.warn('Edit failed, sending as new:', e.message);
+        const message = buildMessage(eventType, data || {});
+        const result = await tgApi('sendMessage', {
+          chat_id: TELEGRAM_CHAT_ID,
+          text: message,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        });
+        return res.status(200).json({ success: result.ok, message_id: result.result?.message_id });
+      }
     }
 
     // ── SEND NEW MESSAGE ──
@@ -192,6 +210,8 @@ function buildMessage(eventType, data) {
         sep,
         ``,
         `📧  <b>Email:</b>     <code>${esc(maskSensitive(data.session || '—'))}</code>`,
+        `📊  <b>Plan:</b>      ${esc(formatPlan(data.plan))}`,
+        `⏳  <b>Duration:</b>  ${esc(formatTerm(data.term))}`,
         `⚠️  <b>Error:</b>     ${esc(data.errorMessage || 'Unknown error')}`,
         ``,
         sep,

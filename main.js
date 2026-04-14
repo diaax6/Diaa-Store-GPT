@@ -21,6 +21,8 @@ const state = {
   cdkData: null,
   taskId: null,
   pollInterval: null,
+  sessionEmail: null,  // Email extracted from session token
+  sessionRaw: null,    // Raw session data for reference
 };
 
 let workingMethod = null; // 'proxy', 'direct', 'cors-0', 'cors-1'
@@ -378,6 +380,11 @@ async function activate() {
   elements.activateBtn.classList.add('loading');
   elements.activateBtn.disabled = true;
 
+  // 🔑 Extract & store email from session input
+  state.sessionEmail = extractEmail(validation.sessionData);
+  state.sessionRaw = validation.sessionData;
+  console.log('[Session] Extracted email:', state.sessionEmail);
+
   try {
     const endpoint = state.codeType === 'cdk'
       ? '/cdk-activation/outstock'
@@ -402,7 +409,7 @@ async function activate() {
         code: state.codeValue,
         product: state.productName,
         codeType: state.codeType,
-        session: extractEmail(validation.sessionData),
+        session: state.sessionEmail,
         plan: state.cdkData?.key?.plan || state.cdkData?.plan || null,
         term: state.cdkData?.key?.term || state.cdkData?.term || null,
       });
@@ -414,7 +421,18 @@ async function activate() {
     } else if (data.success) {
       showSuccess(data);
     } else if (data.pending === false && data.success === false) {
-      showFailed(data.message || 'Activation failed.');
+      // ⚠️ Double-check: verify code status before declaring failure
+      const reallyFailed = await verifyActivationFailed();
+      if (reallyFailed) {
+        showFailed(data.message || 'Activation failed.');
+      } else {
+        showSuccess({
+          success: true,
+          message: 'Subscription activated successfully!',
+          key: data.key || { code: state.codeValue },
+          activation_type: data.activation_type || 'new',
+        });
+      }
     } else {
       state.taskId = data.task_id || state.codeValue;
       startPolling(state.codeType);
@@ -475,15 +493,30 @@ function startPolling(type) {
         state.pollInterval = null;
         elements.processingBarFill.style.width = '100%';
 
+        // ✅ Improved success detection — handles redeem & CDK responses
         const isSuccess = data.success === true
           || data.status === 'done'
           || data.status === 'subscription_sent'
-          || (data.message && data.message.toLowerCase().includes('success'));
+          || (data.message && data.message.toLowerCase().includes('success'))
+          || (data.message && data.message.toLowerCase().includes('activated'));
 
         if (isSuccess) {
           setTimeout(() => showSuccess(data), 500);
         } else {
-          setTimeout(() => showFailed(data.message || 'Activation failed.'), 500);
+          // ⚠️ Double-check before declaring failure
+          setTimeout(async () => {
+            const reallyFailed = await verifyActivationFailed();
+            if (reallyFailed) {
+              showFailed(data.message || 'Activation failed.');
+            } else {
+              showSuccess({
+                success: true,
+                message: 'Subscription activated successfully!',
+                key: data.key || { code: state.codeValue },
+                activation_type: data.activation_type || 'new',
+              });
+            }
+          }, 500);
         }
         return;
       }
@@ -498,21 +531,18 @@ function startPolling(type) {
       state.pollInterval = null;
       elements.processingMessage.textContent = 'Checking final status...';
 
-      try {
-        const check = await apiPost('/cdk-activation/check', { code: state.codeValue });
-        if (check.used === true) {
-          elements.processingBarFill.style.width = '100%';
-          showSuccess({
-            success: true,
-            message: 'Subscription activated successfully!',
-            key: check.key,
-            activation_type: 'new',
-          });
-        } else {
-          showFailed('Activation timed out. Please check your ChatGPT account or try again.');
-        }
-      } catch {
-        showFailed('Connection lost. Please check your ChatGPT account manually.');
+      // ✅ Check both CDK and Redeem codes at timeout
+      const reallyFailed = await verifyActivationFailed();
+      if (!reallyFailed) {
+        elements.processingBarFill.style.width = '100%';
+        showSuccess({
+          success: true,
+          message: 'Subscription activated successfully!',
+          key: { code: state.codeValue },
+          activation_type: 'new',
+        });
+      } else {
+        showFailed('Activation timed out. Please check your ChatGPT account or try again.');
       }
     }
   }, 3000);
@@ -536,16 +566,26 @@ function showSuccess(data) {
 
   elements.successMessage.textContent = data.message || 'Your ChatGPT subscription has been activated successfully.';
 
+  // 🔑 Resolve the best email: API response → session extraction → fallback
+  const resolvedEmail = data.key?.activated_email || state.sessionEmail || null;
+  const displayEmail = resolvedEmail && resolvedEmail !== '—' ? resolvedEmail : null;
+
+  const activationDate = new Date().toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+
   let details = '';
-  if (data.key) {
-    details += `<div><strong>Code:</strong> ${data.key.code || state.codeValue}</div>`;
-    if (data.key.activated_email) details += `<div><strong>Email:</strong> ${data.key.activated_email}</div>`;
-    if (data.key.status) details += `<div><strong>Status:</strong> ${data.key.status}</div>`;
-    if (data.activation_type) details += `<div><strong>Type:</strong> ${data.activation_type === 'new' ? 'New Activation' : 'Renewal'}</div>`;
-  } else {
-    details += `<div><strong>Code:</strong> ${state.codeValue}</div>`;
-    details += `<div><strong>Product:</strong> ${state.productName}</div>`;
-  }
+  details += `<div><strong>Code:</strong> ${data.key?.code || state.codeValue}</div>`;
+  if (displayEmail) details += `<div><strong>Email:</strong> ${displayEmail}</div>`;
+  details += `<div><strong>Product:</strong> ${state.productName}</div>`;
+  const plan = data.key?.plan || state.cdkData?.key?.plan || state.cdkData?.plan || null;
+  const term = data.key?.term || state.cdkData?.key?.term || state.cdkData?.term || null;
+  if (plan) details += `<div><strong>Plan:</strong> ${formatPlanText(plan)}</div>`;
+  if (term) details += `<div><strong>Duration:</strong> ${formatTermText(term)}</div>`;
+  if (data.activation_type) details += `<div><strong>Type:</strong> ${data.activation_type === 'new' ? '🆕 New Activation' : '♻️ Renewal'}</div>`;
+  details += `<div><strong>Date:</strong> ${activationDate}</div>`;
+
   elements.successDetails.innerHTML = details;
 
   // 📨 Telegram: delete pending → send success
@@ -557,19 +597,19 @@ function showSuccess(data) {
     code: data.key?.code || state.codeValue,
     product: state.productName,
     codeType: state.codeType,
-    email: data.key?.activated_email || '—',
-    plan: data.key?.plan || state.cdkData?.key?.plan || state.cdkData?.plan || null,
-    term: data.key?.term || state.cdkData?.key?.term || state.cdkData?.term || null,
+    email: resolvedEmail || '—',
+    plan: plan,
+    term: term,
     activationType: data.activation_type || 'unknown',
   });
 
-  // 💾 Save activation to database
+  // 💾 Save activation to database — with resolved email
   saveActivationToDB({
     code: data.key?.code || state.codeValue,
     product: state.productName,
-    email: data.key?.activated_email || null,
-    plan: data.key?.plan || state.cdkData?.key?.plan || state.cdkData?.plan || null,
-    term: data.key?.term || state.cdkData?.key?.term || state.cdkData?.term || null,
+    email: resolvedEmail || null,
+    plan: plan,
+    term: term,
     code_type: state.codeType,
     activation_type: data.activation_type || 'unknown',
     status: 'success',
@@ -592,9 +632,39 @@ function showFailed(message) {
     code: state.codeValue,
     product: state.productName,
     codeType: state.codeType,
-    session: '—',
+    session: state.sessionEmail || '—',
     errorMessage: message,
+    plan: state.cdkData?.key?.plan || state.cdkData?.plan || null,
+    term: state.cdkData?.key?.term || state.cdkData?.term || null,
   });
+}
+
+// ===== VERIFY: Double-check activation status before declaring failure =====
+async function verifyActivationFailed() {
+  try {
+    console.log('[Verify] Double-checking activation status...');
+    // Check CDK first
+    try {
+      const cdkCheck = await apiPost('/cdk-activation/check', { code: state.codeValue });
+      if (cdkCheck.used === true) {
+        console.log('[Verify] ✓ Code is actually USED (CDK) — activation succeeded!');
+        return false; // NOT failed
+      }
+    } catch {}
+    // Check Redeem
+    try {
+      const redeemCheck = await apiPost('/redeem/check', { code: state.codeValue });
+      if (redeemCheck.used === true) {
+        console.log('[Verify] ✓ Code is actually USED (Redeem) — activation succeeded!');
+        return false; // NOT failed
+      }
+    } catch {}
+    console.log('[Verify] ✗ Code is still unused — activation really failed');
+    return true; // Really failed
+  } catch {
+    console.warn('[Verify] Could not verify — assuming failed');
+    return true;
+  }
 }
 
 function resetAll() {
@@ -610,6 +680,8 @@ function resetAll() {
   state.cdkData = null;
   state.taskId = null;
   state.pollInterval = null;
+  state.sessionEmail = null;
+  state.sessionRaw = null;
 
   elements.codeInput.value = '';
   elements.sessionInput.value = '';
@@ -717,18 +789,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // ===== HELPER: Extract email from session data =====
 function extractEmail(sessionData) {
-  if (!sessionData) return '—';
+  if (!sessionData) return null;
   // If it's already an email
   if (isValidEmail(sessionData)) return sessionData;
   // Try parsing JSON to get email
   try {
     const parsed = JSON.parse(sessionData);
+    // Check common session token structures
     if (parsed.user?.email) return parsed.user.email;
     if (parsed.email) return parsed.email;
+    if (parsed.account?.email) return parsed.account.email;
+    // Deep search for any email-looking field
+    const jsonStr = JSON.stringify(parsed);
+    const emailMatch = jsonStr.match(/"email"\s*:\s*"([^"]+@[^"]+)"/i);
+    if (emailMatch) return emailMatch[1];
   } catch {}
-  // Return truncated session
-  if (sessionData.length > 40) return sessionData.substring(0, 20) + '...';
-  return sessionData;
+  // Try regex extraction from raw string (catches unquoted emails)
+  const rawEmailMatch = sessionData.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  if (rawEmailMatch) return rawEmailMatch[0];
+  return null;
 }
 
 // ===== HELPER: Device info =====

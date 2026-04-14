@@ -130,6 +130,8 @@ function buildMessage(eventType, data) {
         `📋  <b>Type:</b>      ${data.codeType === 'cdk' ? '🟣 CDK Activation' : '🔵 Redeem Code'}`,
         ``, sep, ``,
         `📧  <b>Email:</b>     <code>${esc(maskSensitive(data.session || '—'))}</code>`,
+        `📊  <b>Plan:</b>      ${esc(formatPlan(data.plan))}`,
+        `⏳  <b>Duration:</b>  ${esc(formatTerm(data.term))}`,
         `⚠️  <b>Error:</b>     ${esc(data.errorMessage || 'Unknown error')}`,
         ``, sep,
         `❌  <b>Status:</b>   🔴 <b>Failed</b>`,
@@ -213,26 +215,43 @@ function telegramDevPlugin() {
             const serverIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
                            || req.socket?.remoteAddress
                            || null;
-            if (data && !data.ip) data.ip = serverIp;
+            if (data && (!data.ip || data.ip === 'Unknown')) data.ip = serverIp || 'Unknown';
 
             res.setHeader('Content-Type', 'application/json');
             res.setHeader('Access-Control-Allow-Origin', '*');
 
             if (action === 'delete' && messageId) {
-              const result = await tgApi('deleteMessage', { chat_id: TELEGRAM_CHAT_ID, message_id: messageId });
-              res.statusCode = 200;
-              res.end(JSON.stringify({ success: result.ok }));
+              try {
+                const result = await tgApi('deleteMessage', { chat_id: TELEGRAM_CHAT_ID, message_id: messageId });
+                res.statusCode = 200;
+                res.end(JSON.stringify({ success: result.ok }));
+              } catch (e) {
+                res.statusCode = 200;
+                res.end(JSON.stringify({ success: false, error: e.message }));
+              }
               return;
             }
 
             if (action === 'edit' && messageId && eventType) {
-              const msg = buildMessage(eventType, data || {});
-              const result = await tgApi('editMessageText', {
-                chat_id: TELEGRAM_CHAT_ID, message_id: messageId,
-                text: msg, parse_mode: 'HTML', disable_web_page_preview: true,
-              });
-              res.statusCode = 200;
-              res.end(JSON.stringify({ success: result.ok, message_id: messageId }));
+              try {
+                const msg = buildMessage(eventType, data || {});
+                const result = await tgApi('editMessageText', {
+                  chat_id: TELEGRAM_CHAT_ID, message_id: messageId,
+                  text: msg, parse_mode: 'HTML', disable_web_page_preview: true,
+                });
+                res.statusCode = 200;
+                res.end(JSON.stringify({ success: result.ok, message_id: messageId }));
+              } catch (e) {
+                // Fallback: send as new message if edit fails
+                console.warn('[TG Dev] Edit failed, sending as new:', e.message);
+                const msg = buildMessage(eventType, data || {});
+                const result = await tgApi('sendMessage', {
+                  chat_id: TELEGRAM_CHAT_ID, text: msg,
+                  parse_mode: 'HTML', disable_web_page_preview: true,
+                });
+                res.statusCode = 200;
+                res.end(JSON.stringify({ success: result.ok, message_id: result.result?.message_id }));
+              }
               return;
             }
 
