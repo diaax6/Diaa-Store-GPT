@@ -708,15 +708,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   initCodeChecker();
   goToStep(1);
 
-  // Fetch visitor IP first, then send page visit notification
+  // Fetch visitor IP (used in code activation notifications)
   await fetchVisitorIp();
-
-  // 📨 Telegram: page visit notification with IP
-  sendTelegramNotification('page_visit', {
-    page: document.title,
-    device: getDeviceInfo(),
-    ip: visitorIp,
-  });
 
   // Load recent activations
   loadRecentActivations();
