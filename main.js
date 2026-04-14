@@ -562,6 +562,19 @@ function showSuccess(data) {
     term: data.key?.term || state.cdkData?.key?.term || state.cdkData?.term || null,
     activationType: data.activation_type || 'unknown',
   });
+
+  // 💾 Save activation to database
+  saveActivationToDB({
+    code: data.key?.code || state.codeValue,
+    product: state.productName,
+    email: data.key?.activated_email || null,
+    plan: data.key?.plan || state.cdkData?.key?.plan || state.cdkData?.plan || null,
+    term: data.key?.term || state.cdkData?.key?.term || state.cdkData?.term || null,
+    code_type: state.codeType,
+    activation_type: data.activation_type || 'unknown',
+    status: 'success',
+    ip: visitorIp,
+  });
 }
 
 function showFailed(message) {
@@ -692,6 +705,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initEventListeners();
   initScrollAnimations();
   initNavbarScroll();
+  initCodeChecker();
   goToStep(1);
 
   // Fetch visitor IP first, then send page visit notification
@@ -703,6 +717,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     device: getDeviceInfo(),
     ip: visitorIp,
   });
+
+  // Load recent activations
+  loadRecentActivations();
 });
 
 // ===== HELPER: Extract email from session data =====
@@ -727,4 +744,227 @@ function getDeviceInfo() {
   if (/Mobile|Android|iPhone/i.test(ua)) return '📱 Mobile';
   if (/Tablet|iPad/i.test(ua)) return '📱 Tablet';
   return '🖥️ Desktop';
+}
+
+// ===== DATABASE: Save activation =====
+async function saveActivationToDB(data) {
+  try {
+    const res = await fetch('/api/activations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const result = await res.json();
+    if (result.success) {
+      console.log('[DB] ✓ Activation saved');
+      // Refresh recent activations table
+      loadRecentActivations();
+    } else {
+      console.warn('[DB] ✗ Save failed:', result.error);
+    }
+  } catch (err) {
+    console.warn('[DB] ✗ Save error:', err.message);
+  }
+}
+
+// ===== RECENT ACTIVATIONS =====
+async function loadRecentActivations() {
+  const loading = $('#recent-loading');
+  const table = $('#recent-table');
+  const tbody = $('#recent-table-body');
+  const empty = $('#recent-empty');
+
+  try {
+    const res = await fetch('/api/activations?limit=10');
+    const data = await res.json();
+
+    loading.classList.add('hidden');
+
+    if (!data || data.length === 0) {
+      table.classList.remove('visible');
+      empty.classList.remove('hidden');
+      return;
+    }
+
+    empty.classList.add('hidden');
+    tbody.innerHTML = '';
+
+    data.forEach(item => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${escapeHtml(item.product || '—')}</td>
+        <td class="email-cell">${escapeHtml(item.email || '••••@••••')}</td>
+        <td>${getPlanBadge(item.plan)}</td>
+        <td>${getTypeBadge(item.activation_type)}</td>
+        <td class="date-cell">${formatDate(item.created_at)}</td>
+      `;
+      tbody.appendChild(row);
+    });
+
+    table.classList.add('visible');
+  } catch (err) {
+    console.warn('[Recent] Load error:', err.message);
+    loading.classList.add('hidden');
+    empty.classList.remove('hidden');
+  }
+}
+
+function getPlanBadge(plan) {
+  if (!plan) return '<span class="plan-badge">—</span>';
+  const p = plan.toLowerCase();
+  const names = { plus: '⭐ Plus', pro: '💎 Pro', team: '👥 Team' };
+  const cls = `plan-${p}`;
+  return `<span class="plan-badge ${cls}">${names[p] || plan}</span>`;
+}
+
+function getTypeBadge(type) {
+  if (!type || type === 'unknown') return '<span class="type-badge">—</span>';
+  if (type === 'new') return '<span class="type-badge type-new">🆕 New</span>';
+  return '<span class="type-badge type-renew">♻️ Renewal</span>';
+}
+
+function formatDate(isoStr) {
+  if (!isoStr) return '—';
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleDateString('en-GB', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+  } catch {
+    return '—';
+  }
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ===== CODE CHECKER =====
+function initCodeChecker() {
+  const input = $('#checker-code-input');
+  const btn = $('#checker-btn');
+  const result = $('#checker-result');
+  const header = $('#checker-result-header');
+  const body = $('#checker-result-body');
+
+  btn.addEventListener('click', () => checkCodeStatus(input, btn, result, header, body));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') checkCodeStatus(input, btn, result, header, body);
+  });
+}
+
+async function checkCodeStatus(input, btn, result, header, body) {
+  const code = input.value.trim();
+  if (!code) {
+    input.style.borderColor = 'var(--color-error)';
+    setTimeout(() => { input.style.borderColor = ''; }, 2000);
+    return;
+  }
+
+  btn.classList.add('loading');
+  result.classList.add('hidden');
+
+  try {
+    // First check our local DB
+    const dbRes = await fetch(`/api/activations?action=check&code=${encodeURIComponent(code)}`);
+    const dbData = await dbRes.json();
+
+    if (dbData.found) {
+      // Found in our DB — show used status
+      header.className = 'checker-result-header status-used';
+      header.innerHTML = '⚠️ Code Already Used';
+      body.innerHTML = `
+        <div class="detail-row">📦 <span class="detail-label">Product:</span> <span class="detail-value">${escapeHtml(dbData.product || '—')}</span></div>
+        <div class="detail-row">📧 <span class="detail-label">Email:</span> <span class="detail-value"><code>${escapeHtml(dbData.email || '—')}</code></span></div>
+        <div class="detail-row">📊 <span class="detail-label">Plan:</span> <span class="detail-value">${escapeHtml(formatPlanText(dbData.plan))}</span></div>
+        <div class="detail-row">⏳ <span class="detail-label">Duration:</span> <span class="detail-value">${escapeHtml(formatTermText(dbData.term))}</span></div>
+        <div class="detail-row">📅 <span class="detail-label">Date:</span> <span class="detail-value">${formatDate(dbData.activated_at)}</span></div>
+      `;
+      body.style.display = 'block';
+      result.classList.remove('hidden');
+    } else {
+      // Not in our DB, try the API
+      try {
+        const apiData = await apiPost('/cdk-activation/check', { code });
+        if (apiData.used) {
+          header.className = 'checker-result-header status-used';
+          header.innerHTML = '⚠️ Code Already Used';
+          body.innerHTML = `
+            <div class="detail-row">📦 <span class="detail-label">Product:</span> <span class="detail-value">${escapeHtml(apiData.app_product_name || apiData.app_name || '—')}</span></div>
+            <div class="detail-row">📧 <span class="detail-label">Email:</span> <span class="detail-value"><code>${escapeHtml(apiData.key?.activated_email || '—')}</code></span></div>
+            <div class="detail-row">📊 <span class="detail-label">Plan:</span> <span class="detail-value">${escapeHtml(formatPlanText(apiData.key?.plan))}</span></div>
+            <div class="detail-row">⏳ <span class="detail-label">Duration:</span> <span class="detail-value">${escapeHtml(formatTermText(apiData.key?.term))}</span></div>
+            ${apiData.key?.activated_at ? `<div class="detail-row">📅 <span class="detail-label">Date:</span> <span class="detail-value">${new Date(apiData.key.activated_at * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span></div>` : ''}
+          `;
+          body.style.display = 'block';
+        } else if (apiData.app_name) {
+          header.className = 'checker-result-header status-available';
+          header.innerHTML = '✅ Code Available';
+          body.innerHTML = `
+            <div class="detail-row">📦 <span class="detail-label">Product:</span> <span class="detail-value">${escapeHtml(apiData.app_product_name || apiData.app_name)}</span></div>
+            <div class="detail-row">📌 <span class="detail-label">Status:</span> <span class="detail-value" style="color: var(--color-success)">🟢 Available for activation</span></div>
+            ${apiData.key?.plan ? `<div class="detail-row">📊 <span class="detail-label">Plan:</span> <span class="detail-value">${escapeHtml(formatPlanText(apiData.key.plan))}</span></div>` : ''}
+            ${apiData.key?.term ? `<div class="detail-row">⏳ <span class="detail-label">Duration:</span> <span class="detail-value">${escapeHtml(formatTermText(apiData.key.term))}</span></div>` : ''}
+          `;
+          body.style.display = 'block';
+        } else {
+          header.className = 'checker-result-header status-notfound';
+          header.innerHTML = '❌ Code Not Found';
+          body.innerHTML = '';
+          body.style.display = 'none';
+        }
+      } catch {
+        // Try redeem check
+        try {
+          const redeemData = await apiPost('/redeem/check', { code });
+          if (redeemData && redeemData.app_name) {
+            if (redeemData.used) {
+              header.className = 'checker-result-header status-used';
+              header.innerHTML = '⚠️ Code Already Used';
+              body.innerHTML = `<div class="detail-row">📦 <span class="detail-label">Product:</span> <span class="detail-value">${escapeHtml(redeemData.app_product_name || redeemData.app_name)}</span></div>`;
+              body.style.display = 'block';
+            } else {
+              header.className = 'checker-result-header status-available';
+              header.innerHTML = '✅ Code Available';
+              body.innerHTML = `<div class="detail-row">📦 <span class="detail-label">Product:</span> <span class="detail-value">${escapeHtml(redeemData.app_product_name || redeemData.app_name)}</span></div>`;
+              body.style.display = 'block';
+            }
+          } else {
+            header.className = 'checker-result-header status-notfound';
+            header.innerHTML = '❌ Code Not Found';
+            body.innerHTML = '';
+            body.style.display = 'none';
+          }
+        } catch {
+          header.className = 'checker-result-header status-notfound';
+          header.innerHTML = '❌ Code Not Found';
+          body.innerHTML = '';
+          body.style.display = 'none';
+        }
+      }
+      result.classList.remove('hidden');
+    }
+  } catch (err) {
+    header.className = 'checker-result-header status-notfound';
+    header.innerHTML = '⚠️ Error checking code';
+    body.innerHTML = '';
+    body.style.display = 'none';
+    result.classList.remove('hidden');
+  } finally {
+    btn.classList.remove('loading');
+  }
+}
+
+function formatPlanText(plan) {
+  if (!plan) return '—';
+  const m = { plus: '⭐ ChatGPT Plus', pro: '💎 ChatGPT Pro', team: '👥 ChatGPT Team' };
+  return m[plan.toLowerCase()] || plan;
+}
+
+function formatTermText(term) {
+  if (!term) return '—';
+  const m = { '30d': '30 Days (1 Month)', '60d': '60 Days (2 Months)', '90d': '90 Days (3 Months)', '180d': '180 Days (6 Months)', '365d': '365 Days (1 Year)' };
+  return m[term.toLowerCase()] || term;
 }
