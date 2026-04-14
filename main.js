@@ -5,7 +5,7 @@
 
 // ===== API Configuration =====
 const DIRECT_API = 'https://ai-redeem.cc';
-const PROXY_PREFIX = '/api/proxy?path=';  // Vercel serverless function
+const PROXY_PREFIX = '/api';  // Vite proxy (local) / Vercel rewrite (production)
 
 const CORS_PROXIES = [
   'https://corsproxy.io/?',

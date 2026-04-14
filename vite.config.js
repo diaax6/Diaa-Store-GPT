@@ -10,6 +10,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
         secure: true,
+        headers: {
+          'Origin': 'https://ai-redeem.cc',
+          'Referer': 'https://ai-redeem.cc/',
+          'X-Product-ID': 'chatgpt',
+        },
       },
     },
   },
