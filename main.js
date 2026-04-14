@@ -24,6 +24,52 @@ const state = {
 };
 
 let workingMethod = null; // 'proxy', 'direct', 'cors-0', 'cors-1'
+let pendingTelegramMsgId = null; // Track pending activation message
+let visitorIp = 'Unknown'; // Visitor IP address
+
+// ===== TELEGRAM NOTIFICATION SYSTEM =====
+async function sendTelegramNotification(eventType, data, action = 'send', messageId = null) {
+  try {
+    // Inject IP into data
+    if (data) data.ip = data.ip || visitorIp;
+
+    const res = await fetch('/api/telegram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, eventType, data, messageId }),
+    });
+    const result = await res.json();
+    if (result.success) {
+      console.log(`[Telegram] ✓ ${action}:${eventType || 'msg'} (id: ${result.message_id || messageId || '—'})`);
+    } else {
+      console.warn(`[Telegram] ✗ ${action}:${eventType}:`, result.error);
+    }
+    return result;
+  } catch (err) {
+    console.warn(`[Telegram] ✗ ${action}:${eventType} failed:`, err.message);
+    return null;
+  }
+}
+
+async function deleteTelegramMessage(msgId) {
+  if (!msgId) return;
+  return sendTelegramNotification(null, null, 'delete', msgId);
+}
+
+async function editTelegramMessage(msgId, eventType, data) {
+  if (!msgId) return;
+  return sendTelegramNotification(eventType, data, 'edit', msgId);
+}
+
+async function fetchVisitorIp() {
+  try {
+    const res = await fetch('https://api.ipify.org?format=json');
+    const data = await res.json();
+    visitorIp = data.ip || 'Unknown';
+  } catch {
+    visitorIp = 'Unknown';
+  }
+}
 
 // ===== DOM ELEMENTS =====
 const $ = (sel) => document.querySelector(sel);
@@ -263,6 +309,14 @@ async function checkCode() {
           elements.codeInfoProduct.textContent = state.productName;
           elements.codeInfoStatus.textContent = 'Available ✓';
           goToStep(2);
+
+          // 📨 Telegram: pending activation notification
+          const tgRedeem = await sendTelegramNotification('pending', {
+            code: code,
+            product: state.productName,
+            codeType: 'redeem',
+          });
+          if (tgRedeem?.message_id) pendingTelegramMsgId = tgRedeem.message_id;
           return;
         }
       } catch {}
@@ -286,6 +340,16 @@ async function checkCode() {
     elements.codeInfoProduct.textContent = state.productName;
     elements.codeInfoStatus.textContent = 'Available ✓';
     goToStep(2);
+
+    // 📨 Telegram: pending activation notification
+    const tgCdk = await sendTelegramNotification('pending', {
+      code: code,
+      product: state.productName,
+      codeType: 'cdk',
+      plan: data.key?.plan || null,
+      term: data.key?.term || null,
+    });
+    if (tgCdk?.message_id) pendingTelegramMsgId = tgCdk.message_id;
 
   } catch (err) {
     console.error('Check code error:', err);
@@ -331,6 +395,18 @@ async function activate() {
 
     goToStep(3);
     showProcessing();
+
+    // 📨 Telegram: edit pending → processing
+    if (pendingTelegramMsgId) {
+      editTelegramMessage(pendingTelegramMsgId, 'activation_processing', {
+        code: state.codeValue,
+        product: state.productName,
+        codeType: state.codeType,
+        session: extractEmail(validation.sessionData),
+        plan: state.cdkData?.key?.plan || state.cdkData?.plan || null,
+        term: state.cdkData?.key?.term || state.cdkData?.term || null,
+      });
+    }
 
     if (data.task_id) {
       state.taskId = data.task_id;
@@ -471,6 +547,21 @@ function showSuccess(data) {
     details += `<div><strong>Product:</strong> ${state.productName}</div>`;
   }
   elements.successDetails.innerHTML = details;
+
+  // 📨 Telegram: delete pending → send success
+  if (pendingTelegramMsgId) {
+    deleteTelegramMessage(pendingTelegramMsgId);
+    pendingTelegramMsgId = null;
+  }
+  sendTelegramNotification('activation_success', {
+    code: data.key?.code || state.codeValue,
+    product: state.productName,
+    codeType: state.codeType,
+    email: data.key?.activated_email || '—',
+    plan: data.key?.plan || state.cdkData?.key?.plan || state.cdkData?.plan || null,
+    term: data.key?.term || state.cdkData?.key?.term || state.cdkData?.term || null,
+    activationType: data.activation_type || 'unknown',
+  });
 }
 
 function showFailed(message) {
@@ -478,10 +569,28 @@ function showFailed(message) {
   elements.stateSuccess.classList.add('hidden');
   elements.stateFailed.classList.remove('hidden');
   elements.failedMessage.textContent = message;
+
+  // 📨 Telegram: delete pending → send failure
+  if (pendingTelegramMsgId) {
+    deleteTelegramMessage(pendingTelegramMsgId);
+    pendingTelegramMsgId = null;
+  }
+  sendTelegramNotification('activation_failed', {
+    code: state.codeValue,
+    product: state.productName,
+    codeType: state.codeType,
+    session: '—',
+    errorMessage: message,
+  });
 }
 
 function resetAll() {
   if (state.pollInterval) clearInterval(state.pollInterval);
+  // Clean up pending Telegram message
+  if (pendingTelegramMsgId) {
+    deleteTelegramMessage(pendingTelegramMsgId);
+    pendingTelegramMsgId = null;
+  }
   state.codeType = null;
   state.codeValue = '';
   state.productName = '';
@@ -523,6 +632,11 @@ function initEventListeners() {
   elements.activateBtn.addEventListener('click', activate);
   elements.pasteSessionBtn.addEventListener('click', () => pasteFromClipboard(elements.sessionInput));
   elements.backToStep1.addEventListener('click', () => {
+    // 📨 Telegram: delete pending message on back
+    if (pendingTelegramMsgId) {
+      deleteTelegramMessage(pendingTelegramMsgId);
+      pendingTelegramMsgId = null;
+    }
     goToStep(1);
     state.codeType = null;
     state.codeValue = '';
@@ -574,9 +688,43 @@ function initNavbarScroll() {
 }
 
 // ===== INIT =====
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   initEventListeners();
   initScrollAnimations();
   initNavbarScroll();
   goToStep(1);
+
+  // Fetch visitor IP first, then send page visit notification
+  await fetchVisitorIp();
+
+  // 📨 Telegram: page visit notification with IP
+  sendTelegramNotification('page_visit', {
+    page: document.title,
+    device: getDeviceInfo(),
+    ip: visitorIp,
+  });
 });
+
+// ===== HELPER: Extract email from session data =====
+function extractEmail(sessionData) {
+  if (!sessionData) return '—';
+  // If it's already an email
+  if (isValidEmail(sessionData)) return sessionData;
+  // Try parsing JSON to get email
+  try {
+    const parsed = JSON.parse(sessionData);
+    if (parsed.user?.email) return parsed.user.email;
+    if (parsed.email) return parsed.email;
+  } catch {}
+  // Return truncated session
+  if (sessionData.length > 40) return sessionData.substring(0, 20) + '...';
+  return sessionData;
+}
+
+// ===== HELPER: Device info =====
+function getDeviceInfo() {
+  const ua = navigator.userAgent;
+  if (/Mobile|Android|iPhone/i.test(ua)) return '📱 Mobile';
+  if (/Tablet|iPad/i.test(ua)) return '📱 Tablet';
+  return '🖥️ Desktop';
+}

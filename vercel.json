@@ -1,5 +1,6 @@
 {
   "rewrites": [
+    { "source": "/api/telegram", "destination": "/api/telegram" },
     { "source": "/api/:path*", "destination": "/api/proxy?path=/:path*" }
   ],
   "headers": [
