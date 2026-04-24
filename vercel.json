@@ -1,4 +1,11 @@
 {
+  "buildCommand": "vite build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/*.js": {
+      "runtime": "@vercel/node@3"
+    }
+  },
   "rewrites": [
     { "source": "/api/telegram", "destination": "/api/telegram" },
     { "source": "/api/activations", "destination": "/api/activations" },

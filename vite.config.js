@@ -197,6 +197,7 @@ function telegramDevPlugin() {
     name: 'telegram-dev-proxy',
     configureServer(server) {
       server.middlewares.use('/api/telegram', async (req, res) => {
+        console.log(`[Telegram Dev] ${req.method} ${req.url}`);
         if (req.method === 'OPTIONS') {
           res.setHeader('Access-Control-Allow-Origin', '*');
           res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -277,6 +278,7 @@ function activationsDevPlugin() {
     name: 'activations-dev-proxy',
     configureServer(server) {
       server.middlewares.use('/api/activations', async (req, res) => {
+        console.log(`[Activations Dev] ${req.method} ${req.url}`);
         if (req.method === 'OPTIONS') {
           res.setHeader('Access-Control-Allow-Origin', '*');
           res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -316,8 +318,10 @@ function activationsDevPlugin() {
 
             const limit = url.searchParams.get('limit') || 10;
             const sbUrl = `${REST_URL}?status=eq.success&order=created_at.desc&limit=${limit}`;
+            console.log('[Activations Dev] Fetching from Supabase:', sbUrl);
             const sbRes = await fetch(sbUrl, { headers: sbHeaders });
             const data = await sbRes.json();
+            console.log(`[Activations Dev] Got ${Array.isArray(data) ? data.length : 0} records from Supabase`);
             const masked = (data || []).map(r => ({
               id: r.id, product: r.product, email: maskEmailDev(r.email),
               plan: r.plan, term: r.term, activation_type: r.activation_type, created_at: r.created_at,
@@ -346,6 +350,13 @@ function activationsDevPlugin() {
                   }),
                 });
                 const data = await sbRes.json();
+                console.log('[Activations Dev] POST result:', JSON.stringify(data).substring(0, 200));
+                if (!sbRes.ok) {
+                  console.error('[Activations Dev] Supabase POST error:', sbRes.status, JSON.stringify(data));
+                  res.statusCode = 500;
+                  res.end(JSON.stringify({ error: 'Supabase error', details: data }));
+                  return;
+                }
                 res.statusCode = 201;
                 res.end(JSON.stringify({ success: true, data: data[0] || data }));
               } catch (err) {
@@ -373,6 +384,7 @@ export default defineConfig({
     port: 3000,
     open: true,
     proxy: {
+      // Only proxy AI-redeem API calls — EXCLUDE our custom endpoints
       '/api': {
         target: 'https://ai-redeem.cc',
         changeOrigin: true,
@@ -382,6 +394,12 @@ export default defineConfig({
           'Origin': 'https://ai-redeem.cc',
           'Referer': 'https://ai-redeem.cc/',
           'X-Product-ID': 'chatgpt',
+        },
+        // ⬇️ CRITICAL: Skip proxy for our custom API routes so plugins handle them
+        bypass(req) {
+          if (req.url.startsWith('/api/telegram') || req.url.startsWith('/api/activations')) {
+            return req.url; // Return the URL to skip proxy & let middleware handle it
+          }
         },
       },
     },

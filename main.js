@@ -35,11 +35,16 @@ async function sendTelegramNotification(eventType, data, action = 'send', messag
     // Inject IP into data
     if (data) data.ip = data.ip || visitorIp;
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+
     const res = await fetch('/api/telegram', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, eventType, data, messageId }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     const result = await res.json();
     if (result.success) {
       console.log(`[Telegram] ✓ ${action}:${eventType || 'msg'} (id: ${result.message_id || messageId || '—'})`);
@@ -94,6 +99,9 @@ const elements = {
   sessionError: $('#session-error'),
   codeInfoProduct: $('#code-info-product'),
   codeInfoStatus: $('#code-info-status'),
+  accountInfoBadge: $('#account-info-badge'),
+  accountInfoEmail: $('#account-info-email'),
+  accountInfoPlan: $('#account-info-plan'),
   stateProcessing: $('#state-processing'),
   stateSuccess: $('#state-success'),
   stateFailed: $('#state-failed'),
@@ -694,6 +702,8 @@ function resetAll() {
   elements.stateFailed.classList.add('hidden');
 
   goToStep(1);
+  // Hide account info
+  elements.accountInfoBadge.classList.add('hidden');
 }
 
 // ===== CLIPBOARD =====
@@ -715,7 +725,17 @@ function initEventListeners() {
   elements.codeInput.addEventListener('input', () => elements.codeInput.classList.remove('error'));
 
   elements.activateBtn.addEventListener('click', activate);
-  elements.pasteSessionBtn.addEventListener('click', () => pasteFromClipboard(elements.sessionInput));
+  elements.pasteSessionBtn.addEventListener('click', async () => {
+    await pasteFromClipboard(elements.sessionInput);
+    // Auto-check account after paste
+    setTimeout(() => checkSessionAccount(), 200);
+  });
+  // Also check account on manual input (debounced)
+  let sessionCheckTimer = null;
+  elements.sessionInput.addEventListener('input', () => {
+    clearTimeout(sessionCheckTimer);
+    sessionCheckTimer = setTimeout(() => checkSessionAccount(), 600);
+  });
   elements.backToStep1.addEventListener('click', () => {
     // 📨 Telegram: delete pending message on back
     if (pendingTelegramMsgId) {
@@ -727,6 +747,8 @@ function initEventListeners() {
     state.codeValue = '';
     state.productName = '';
     state.cdkData = null;
+    // Hide account info badge on back
+    elements.accountInfoBadge.classList.add('hidden');
   });
 
   elements.newActivationBtn.addEventListener('click', resetAll);
@@ -737,6 +759,55 @@ function initEventListeners() {
     elements.stateFailed.classList.add('hidden');
     goToStep(2);
   });
+}
+
+// ===== SESSION ACCOUNT CHECK =====
+function checkSessionAccount() {
+  const raw = elements.sessionInput.value.trim();
+  if (!raw) {
+    elements.accountInfoBadge.classList.add('hidden');
+    return;
+  }
+
+  let email = null;
+  let plan = null;
+
+  // Check if it's a plain email
+  if (isValidEmail(raw)) {
+    email = raw;
+  } else {
+    // Try parsing JSON session
+    try {
+      const parsed = JSON.parse(raw);
+      // Extract email
+      email = parsed.user?.email || parsed.email || parsed.account?.email || null;
+      if (!email) {
+        const jsonStr = JSON.stringify(parsed);
+        const emailMatch = jsonStr.match(/"email"\s*:\s*"([^"]+@[^"]+)"/i);
+        if (emailMatch) email = emailMatch[1];
+      }
+      // Extract plan type from account info
+      if (parsed.account) {
+        const planType = parsed.account.planType || parsed.account.plan_type || null;
+        const accountPlan = parsed.account.plan || null;
+        plan = planType || accountPlan || null;
+      }
+      if (!plan && parsed.planType) plan = parsed.planType;
+      if (!plan && parsed.plan) plan = parsed.plan;
+    } catch {
+      // Try regex extraction from raw string
+      const rawEmailMatch = raw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+      if (rawEmailMatch) email = rawEmailMatch[0];
+    }
+  }
+
+  if (email || plan) {
+    elements.accountInfoEmail.textContent = email ? `📧 ${email}` : '—';
+    elements.accountInfoPlan.textContent = plan ? `📊 ${formatPlanText(plan)}` : '—';
+    elements.accountInfoBadge.classList.remove('hidden');
+  } else {
+    elements.accountInfoBadge.classList.add('hidden');
+  }
 }
 
 // ===== SCROLL ANIMATIONS =====
@@ -821,18 +892,24 @@ function getDeviceInfo() {
 // ===== DATABASE: Save activation =====
 async function saveActivationToDB(data) {
   try {
+    console.log('[DB] Saving activation:', JSON.stringify(data).substring(0, 200));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
     const res = await fetch('/api/activations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     const result = await res.json();
     if (result.success) {
-      console.log('[DB] ✓ Activation saved');
+      console.log('[DB] ✓ Activation saved:', result.data?.id || 'OK');
       // Refresh recent activations table
       loadRecentActivations();
     } else {
-      console.warn('[DB] ✗ Save failed:', result.error);
+      console.warn('[DB] ✗ Save failed:', result.error, result.details || '');
     }
   } catch (err) {
     console.warn('[DB] ✗ Save error:', err.message);
@@ -847,8 +924,22 @@ async function loadRecentActivations() {
   const empty = $('#recent-empty');
 
   try {
-    const res = await fetch('/api/activations?limit=10');
+    console.log('[Recent] Loading activations...');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+    const res = await fetch('/api/activations?limit=10', {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn('[Recent] API returned error:', res.status, res.statusText);
+      throw new Error(`API error ${res.status}`);
+    }
+
     const data = await res.json();
+    console.log(`[Recent] Loaded ${Array.isArray(data) ? data.length : 0} activations`);
 
     loading.classList.add('hidden');
 
@@ -883,7 +974,7 @@ async function loadRecentActivations() {
 
 function getPlanBadge(plan) {
   if (!plan) return '<span class="plan-badge">—</span>';
-  const p = plan.toLowerCase();
+  const p = plan.toLowerCase().replace('chatgpt_', '').replace('chatgpt ', '');
   const names = { plus: '⭐ Plus', pro: '💎 Pro', team: '👥 Team' };
   const cls = `plan-${p}`;
   return `<span class="plan-badge ${cls}">${names[p] || plan}</span>`;
@@ -1031,12 +1122,19 @@ async function checkCodeStatus(input, btn, result, header, body) {
 
 function formatPlanText(plan) {
   if (!plan) return '—';
+  const key = plan.toLowerCase().replace('chatgpt_', '').replace('chatgpt ', '');
   const m = { plus: '⭐ ChatGPT Plus', pro: '💎 ChatGPT Pro', team: '👥 ChatGPT Team' };
-  return m[plan.toLowerCase()] || plan;
+  return m[key] || plan;
 }
 
 function formatTermText(term) {
   if (!term) return '—';
-  const m = { '30d': '30 Days (1 Month)', '60d': '60 Days (2 Months)', '90d': '90 Days (3 Months)', '180d': '180 Days (6 Months)', '365d': '365 Days (1 Year)' };
+  const m = {
+    '1m': '1 Month', '30d': '30 Days (1 Month)',
+    '2m': '2 Months', '60d': '60 Days (2 Months)',
+    '3m': '3 Months', '90d': '90 Days (3 Months)',
+    '6m': '6 Months', '180d': '180 Days (6 Months)',
+    '1y': '1 Year', '365d': '365 Days (1 Year)',
+  };
   return m[term.toLowerCase()] || term;
 }

@@ -221,7 +221,7 @@ input, textarea {
    ============================================= */
 .hero {
   position: relative;
-  padding: 160px 32px 80px;
+  padding: 160px 32px 50px;
   text-align: center;
   overflow: hidden;
 }
@@ -640,6 +640,48 @@ input, textarea {
 }
 .session-hint a:hover {
   color: var(--color-accent);
+}
+
+/* --- Account Info Badge (shown after session check) --- */
+.account-info-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  border-radius: var(--radius-md);
+  margin-bottom: 20px;
+  animation: fadeInUp 0.4s ease;
+}
+.account-info-badge.hidden {
+  display: none;
+}
+.account-info-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(139, 92, 246, 0.12);
+  border-radius: 50%;
+  color: var(--color-primary-light);
+  flex-shrink: 0;
+}
+.account-info-text {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+.account-info-email {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.account-info-plan {
+  font-size: 0.8rem;
+  color: var(--color-primary-light);
+  font-weight: 500;
 }
 
 /* --- Error Message --- */
